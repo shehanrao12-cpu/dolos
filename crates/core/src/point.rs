@@ -252,4 +252,113 @@ mod tests {
         assert!("12345(invalid)".parse::<ChainPoint>().is_err());
         assert!("12345(short)".parse::<ChainPoint>().is_err());
     }
+
+    #[test]
+    fn test_slot_and_hash_accessors() {
+        let hash = Hash::new([7u8; 32]);
+
+        assert_eq!(ChainPoint::Origin.slot(), 0);
+        assert_eq!(ChainPoint::Origin.hash(), None);
+
+        assert_eq!(ChainPoint::Slot(42).slot(), 42);
+        assert_eq!(ChainPoint::Slot(42).hash(), None);
+
+        assert_eq!(ChainPoint::Specific(42, hash).slot(), 42);
+        assert_eq!(ChainPoint::Specific(42, hash).hash(), Some(hash));
+    }
+
+    #[test]
+    fn test_is_fully_defined() {
+        // Origin is always a valid intersection point.
+        assert!(ChainPoint::Origin.is_fully_defined());
+
+        // Slot-only points lack a hash, so they can never be fully defined.
+        assert!(!ChainPoint::Slot(42).is_fully_defined());
+
+        // A Specific with a real hash is fully defined.
+        assert!(ChainPoint::Specific(42, Hash::new([1u8; 32])).is_fully_defined());
+
+        // A Specific carrying the all-zero "synthetic" hash is NOT fully
+        // defined: this is the sentinel used by reset_to / epoch boundaries
+        // and must not be treated as a real intersection point.
+        assert!(!ChainPoint::Specific(42, Hash::new([0u8; 32])).is_fully_defined());
+    }
+
+    #[test]
+    fn test_into_bytes_origin_is_all_zero() {
+        assert_eq!(ChainPoint::Origin.into_bytes(), [0u8; 40]);
+    }
+
+    #[test]
+    fn test_from_bytes_all_zero_is_origin() {
+        assert_eq!(ChainPoint::from_bytes([0u8; 40]), ChainPoint::Origin);
+    }
+
+    #[test]
+    fn test_specific_bytes_roundtrip() {
+        let point = ChainPoint::Specific(123_456_789, Hash::new([9u8; 32]));
+        assert_eq!(ChainPoint::from_bytes(point.clone().into_bytes()), point);
+    }
+
+    #[test]
+    fn test_slot_only_serializes_with_zero_hash() {
+        // A Slot-only point has no hash, so its byte form carries the zero
+        // sentinel and decodes back as a Specific with the synthetic hash.
+        // The WAL relies on this (it skips synthetic zero-hash entries).
+        let bytes = ChainPoint::Slot(42).into_bytes();
+        assert_eq!(&bytes[8..40], &[0u8; 32]);
+        assert_eq!(
+            ChainPoint::from_bytes(bytes),
+            ChainPoint::Specific(42, Hash::new([0u8; 32]))
+        );
+    }
+
+    #[test]
+    fn test_ordering_by_slot_then_hash() {
+        let low_slot = ChainPoint::Specific(1, Hash::new([0xff; 32]));
+        let high_slot = ChainPoint::Specific(2, Hash::new([0x00; 32]));
+        // Slot dominates the ordering regardless of hash bytes.
+        assert!(low_slot < high_slot);
+
+        // Within the same slot, ordering falls back to the hash.
+        let small_hash = ChainPoint::Specific(5, Hash::new([0x00; 32]));
+        let big_hash = ChainPoint::Specific(5, Hash::new([0x01; 32]));
+        assert!(small_hash < big_hash);
+    }
+
+    #[test]
+    fn test_asymmetric_equality_is_intentional() {
+        // INTENTIONAL: a more-specific point may match a less-specific one by
+        // slot alone (used for chain intersection). This makes PartialEq
+        // deliberately asymmetric; the test guards that behavior so it isn't
+        // "fixed" by accident, which would break intersection matching.
+        let specific = ChainPoint::Specific(7, Hash::new([3u8; 32]));
+        let slot_only = ChainPoint::Slot(7);
+        assert_eq!(specific, slot_only);
+        assert_ne!(slot_only, specific);
+    }
+
+    #[test]
+    fn test_slot_try_into_pallas_point_fails() {
+        // A Slot-only point cannot become a Pallas Point (no hash).
+        let result: Result<PallasPoint, ()> = ChainPoint::Slot(42).try_into();
+        assert!(result.is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn test_specific_bytes_roundtrip_prop(point in any_specific_point()) {
+            // Skip the single ambiguous value (slot 0 + zero hash) that aliases
+            // the Origin sentinel; every other Specific must round-trip exactly.
+            prop_assume!(point.clone().into_bytes() != ChainPoint::ORIGIN_BYTES);
+            prop_assert_eq!(ChainPoint::from_bytes(point.clone().into_bytes()), point);
+        }
+
+        #[test]
+        fn test_display_fromstr_roundtrip_specific(point in any_specific_point()) {
+            let rendered = point.to_string();
+            let parsed: ChainPoint = rendered.parse().unwrap();
+            prop_assert_eq!(parsed, point);
+        }
+    }
 }
