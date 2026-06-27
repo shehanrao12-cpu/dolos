@@ -1394,6 +1394,7 @@ dependencies = [
  "inquire",
  "itertools 0.14.0",
  "lazy_static",
+ "libc",
  "log",
  "miette",
  "mithril-client",

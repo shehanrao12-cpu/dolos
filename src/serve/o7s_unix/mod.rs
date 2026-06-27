@@ -6,6 +6,31 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::prelude::*;
 
+/// Check whether a process with the given PID is currently running.
+///
+/// Uses `kill(pid, 0)`, which sends no signal but still performs the kernel's
+/// existence and permission checks. A return of `0` means the process exists.
+/// An `EPERM` error means it exists but is owned by another user, so we still
+/// treat it as alive; any other error (notably `ESRCH`) means it's gone.
+///
+/// Reading the error through `std::io::Error::last_os_error()` keeps this
+/// portable: it avoids the platform-specific errno accessor (Linux's
+/// `__errno_location` vs macOS's `__error`).
+fn is_process_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 mod chainsync;
 mod statequery;
 mod utils;
@@ -94,12 +119,36 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
 
     #[instrument(skip_all)]
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
-        // preventive removal of socket file in case of unclean shutdown
+        // Preventive removal of the socket file in case of unclean shutdown.
+        // A PID lockfile alongside the socket lets us tell apart a stale socket
+        // (left behind by a killed process) from one still in use by a live
+        // instance, instead of blindly removing it.
+        let lock_path = cfg.service.listen_path.with_extension("pid");
         if std::fs::metadata(&cfg.service.listen_path).is_ok() {
-            debug!("preventive removal of socket file");
+            let holder = std::fs::read_to_string(&lock_path)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+                .filter(|&pid| pid != 0 && is_process_running(pid));
+
+            if let Some(pid) = holder {
+                return Err(ServeError::Internal(
+                    format!(
+                        "socket {} is in use by PID {pid}",
+                        cfg.service.listen_path.display(),
+                    )
+                    .into(),
+                ));
+            }
+
+            debug!("preventive removal of stale socket file");
+            let _ = std::fs::remove_file(&lock_path);
             std::fs::remove_file(&cfg.service.listen_path)
                 .map_err(|e| ServeError::Internal(e.into()))?;
         }
+
+        // record our PID so a future run can detect whether we're still alive
+        std::fs::write(&lock_path, std::process::id().to_string())
+            .map_err(|e| ServeError::Internal(e.into()))?;
 
         let mut tasks = TaskTracker::new();
 
@@ -119,6 +168,9 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 return Err(ServeError::Internal(error.into()));
             }
         }
+
+        // clean up the PID lockfile as well
+        let _ = std::fs::remove_file(&lock_path);
 
         // notify the tracker that we're done receiving new tasks. Without this explicit
         // close, the wait will block forever.

@@ -93,6 +93,10 @@ mithril-client = { version = "0.12.2", optional = true, default-features = false
     "rustls-tls-webpki-roots",
 ] }
 
+# unix-only: PID liveness check via kill(pid, 0) for stale socket recovery
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 anyhow = "1.0"
 comfy-table = "7.1.1"
