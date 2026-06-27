@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "taskbounty": {
+      "command": "taskbounty-mcp-server",
+      "args": []
+    }
+  }
+}
