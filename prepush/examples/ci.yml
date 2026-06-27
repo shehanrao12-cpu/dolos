@@ -1,0 +1,23 @@
+# A sample workflow you can try prepush against:
+#   prepush examples/ci.yml
+name: Example
+env:
+  GREETING: hello
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [alpha, beta]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4          # skipped locally (already in your tree)
+      - name: Say hello
+        run: echo "${{ env.GREETING }} from ${{ matrix.target }} on ${{ runner.os }}"
+      - name: Run a quick check
+        run: |
+          test 1 -eq 1
+          echo "checks passed"
+      - name: Windows-only step
+        if: runner.os == 'Windows'          # skipped on non-Windows hosts
+        run: echo "this won't run on Linux/macOS"
