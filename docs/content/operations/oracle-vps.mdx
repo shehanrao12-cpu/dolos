@@ -1,0 +1,237 @@
+---
+title: Oracle Cloud VPS Setup
+sidebar:
+  order: 6
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+This guide walks through deploying _Dolos_ on an Oracle Cloud Infrastructure (OCI) virtual machine. Oracle Cloud's Always Free tier includes Ampere A1 (ARM64) instances with up to 4 cores, 24 GB RAM, and 200 GB of storage at no cost — a generous fit for a lightweight Dolos deployment.
+
+## Prerequisites
+
+- An [Oracle Cloud account](https://www.oracle.com/cloud/free/)
+- SSH key pair on your local machine (or generated during instance creation)
+
+## Create a VM Instance
+
+<Steps>
+
+1. ### Sign in to OCI Console
+
+   Go to the [OCI Console](https://cloud.oracle.com) and sign in.
+
+2. ### Open the Compute Instance wizard
+
+   Navigate to **Compute → Instances** and click **Create instance**.
+
+3. ### Choose a name and availability domain
+
+   Give your instance a recognizable name (e.g. `dolos-mainnet`). Leave the availability domain at its default.
+
+4. ### Select the shape
+
+   Under **Image and shape**, click **Change shape**.
+
+   - Select **Ampere** in the shape series list.
+   - Choose **VM.Standard.A1.Flex**.
+   - Set **OCPUs** to `2` and **Memory** to `12 GB` (or higher if you intend to run full-archive mode or serve heavy query traffic).
+
+   <Aside type="tip">
+   The Always Free tier allows up to 4 OCPUs and 24 GB RAM total across all A1 instances in your tenancy. A single 2 OCPU / 12 GB instance leaves headroom for a second node or future growth.
+   </Aside>
+
+5. ### Choose an image
+
+   Keep the default **Oracle Linux 9** image, or switch to **Ubuntu 22.04** if you prefer. Both are supported. The commands in this guide target Ubuntu; Oracle Linux equivalents are noted where they differ.
+
+6. ### Configure networking
+
+   Leave the default VCN and public subnet. Make sure **Assign a public IPv4 address** is enabled so you can reach the node from the internet.
+
+7. ### Add your SSH key
+
+   Paste your public key or upload a `.pub` file. If you do not have a key pair yet, click **Generate a key pair for me** and download both files before continuing.
+
+8. ### Configure the boot volume
+
+   Under **Boot volume**, set the size to at least `100 GB`. For full-archive mode set it to `200 GB`.
+
+9. ### Launch
+
+   Click **Create**. The instance reaches **Running** state in about a minute.
+
+</Steps>
+
+## Open Firewall Ports in OCI
+
+OCI uses two layers of network access control: the VCN security list (or network security group) and the OS-level firewall. Both must allow traffic for Dolos endpoints to be reachable.
+
+### Add ingress rules to the security list
+
+1. In the OCI Console, go to **Networking → Virtual Cloud Networks**, select your VCN, and open the **Security Lists** for your public subnet.
+2. Click **Add Ingress Rules** and add the ports your Dolos instance will serve:
+
+| Protocol | Destination Port | Purpose |
+| -------- | ---------------- | ------- |
+| TCP | 50051 | gRPC (UTxO RPC) |
+| TCP | 3000 | Mini-Blockfrost HTTP |
+| TCP | 3001 | Mini-Kupo HTTP |
+| TCP | 3337 | Ouroboros compatibility |
+
+Add only the ports that correspond to the APIs you have enabled in your configuration.
+
+<Aside type="caution">
+Keep SSH (port 22) restricted to your own IP address. Exposing it to `0.0.0.0/0` is a significant security risk.
+</Aside>
+
+## Connect to the Instance
+
+```sh
+ssh ubuntu@<your-instance-public-ip>
+```
+
+Replace `ubuntu` with `opc` if you chose Oracle Linux.
+
+## Prepare the Server
+
+### Update packages
+
+<Tabs>
+  <TabItem label="Ubuntu">
+    ```sh
+    sudo apt update && sudo apt upgrade -y
+    ```
+  </TabItem>
+  <TabItem label="Oracle Linux">
+    ```sh
+    sudo dnf update -y
+    ```
+  </TabItem>
+</Tabs>
+
+### Open ports in the OS firewall
+
+<Tabs>
+  <TabItem label="Ubuntu (ufw)">
+    ```sh
+    sudo ufw allow 22/tcp
+    sudo ufw allow 50051/tcp
+    sudo ufw allow 3000/tcp
+    sudo ufw enable
+    ```
+  </TabItem>
+  <TabItem label="Oracle Linux (firewalld)">
+    ```sh
+    sudo firewall-cmd --permanent --add-port=50051/tcp
+    sudo firewall-cmd --permanent --add-port=3000/tcp
+    sudo firewall-cmd --reload
+    ```
+  </TabItem>
+</Tabs>
+
+Add or omit port rules to match the APIs you configured in OCI above.
+
+## Install Dolos
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/txpipe/dolos/releases/latest/download/dolos-installer.sh | sh
+```
+
+Verify the installation:
+
+```sh
+dolos --version
+```
+
+## Configure and Bootstrap
+
+Run the interactive setup wizard. It asks for the network (mainnet, preprod, or preview) and automatically populates the configuration file and starts a Mithril bootstrap:
+
+```sh
+dolos init
+```
+
+This creates a `dolos.toml` in the current directory and begins syncing. For mainnet the Mithril import typically takes a few hours on A1 hardware.
+
+<Aside type="note">
+For details on all available bootstrap methods (Mithril, snapshot, relay, local node), see the [Bootstrap](../bootstrap) section. For a full reference of every configuration key, see the [Configuration Schema](../configuration/schema).
+</Aside>
+
+## Run as a Systemd Service
+
+Running Dolos under systemd ensures it starts automatically on boot and restarts after a crash.
+
+1. Create a dedicated user:
+
+   ```sh
+   sudo useradd --system --no-create-home --shell /usr/sbin/nologin dolos
+   ```
+
+2. Create the working directory and copy your config:
+
+   ```sh
+   sudo mkdir -p /var/lib/dolos
+   sudo cp dolos.toml /var/lib/dolos/dolos.toml
+   sudo chown -R dolos:dolos /var/lib/dolos
+   ```
+
+3. Create the unit file:
+
+   ```sh
+   sudo tee /etc/systemd/system/dolos.service > /dev/null <<'EOF'
+   [Unit]
+   Description=Dolos Cardano Data Node
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   User=dolos
+   Group=dolos
+   WorkingDirectory=/var/lib/dolos
+   ExecStart=/home/ubuntu/.cargo/bin/dolos daemon
+   Restart=on-failure
+   RestartSec=5s
+   LimitNOFILE=65536
+
+   [Install]
+   WantedBy=multi-user.target
+   EOF
+   ```
+
+   Adjust the `ExecStart` path if Dolos was installed to a different location (`which dolos` will tell you).
+
+4. Enable and start the service:
+
+   ```sh
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now dolos
+   ```
+
+5. Check the service status:
+
+   ```sh
+   sudo systemctl status dolos
+   sudo journalctl -u dolos -f
+   ```
+
+## Verify the Node
+
+Once the daemon is running and bootstrap has completed, you can test reachability. For the gRPC endpoint:
+
+```sh
+grpcurl -plaintext <your-instance-public-ip>:50051 list
+```
+
+For the Mini-Blockfrost endpoint:
+
+```sh
+curl http://<your-instance-public-ip>:3000/blocks/latest
+```
+
+## Next Steps
+
+- [Configuration Schema](../configuration/schema) — tune storage mode, cache sizes, and enabled APIs
+- [Performance](../operations/performance) — guidance on sizing and storage profiles
+- [Logging](../operations/logging) — how to read and filter Dolos log output
+- [Troubleshooting](../operations/troubleshooting) — common errors and how to resolve them
