@@ -213,6 +213,124 @@ bug class and location, which is what makes a report credible and fast to triage
 
 ---
 
+## 6. Worked example, end to end (exact commands)
+
+Two concrete walkthroughs: one that is trivially runnable (Exiv2), and one that
+maps to a **cash** program (libsoup → Sovereign Tech).
+
+### 6a. Exiv2 — runnable today (CVE credit; encoder path still yields 2025 bugs)
+
+```bash
+# 1. Get the source
+git clone https://github.com/Exiv2/exiv2
+cd exiv2
+
+# 2. Build with Clang + libFuzzer + ASan + UBSan, fuzz targets enabled
+cmake -B build \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_CXX_FLAGS="-g -O1 -fsanitize=fuzzer-no-link,address,undefined" \
+  -DEXIV2_BUILD_FUZZ_TESTS=ON -DEXIV2_ENABLE_PNG=ON -DEXIV2_ENABLE_WEBP=ON
+cmake --build build -j"$(nproc)"
+
+# 3. Seed a corpus with real sample images (better coverage, faster bugs)
+mkdir corpus
+cp test/data/*.jpg test/data/*.tif test/data/*.png corpus/ 2>/dev/null
+
+# 4. Run the fuzzer in parallel across all cores
+./build/bin/fuzz-read-print-write corpus \
+  -jobs="$(nproc)" -workers="$(nproc)" -max_len=1000000
+```
+
+When it crashes it writes a `crash-<hash>` file and prints an ASan report. Triage
+with §3, minimize, then report via Exiv2's GitHub "Report a vulnerability"
+(private security advisory). Exiv2 gives **CVE credit**, not cash — use it to build
+a track record, then point the *same technique* at a paying target below.
+
+### 6b. libsoup — the cash version (Sovereign Tech via YesWeHack, €500–10k)
+
+```bash
+# 1. Source
+git clone https://gitlab.gnome.org/GNOME/libsoup
+cd libsoup
+
+# 2. Build with Meson, Clang, sanitizers, fuzzers on
+CC=clang CXX=clang++ meson setup build \
+  -Dfuzzing=enabled -Db_sanitize=address,undefined -Dbuildtype=debugoptimized
+meson compile -C build
+
+# 3. The harnesses live in fuzzing/ ; run the HTTP header/message parser one
+mkdir corpus
+./build/fuzzing/<harness-binary> corpus -jobs="$(nproc)" -max_len=65536
+```
+
+> Always check each repo's `fuzzing/`, `fuzz/`, or `oss-fuzz/` directory and its
+> build docs — option names (`-Dfuzzing`, `EXIV2_BUILD_FUZZ_TESTS`, etc.) differ
+> per project. The *pattern* is identical everywhere: build with
+> `clang -fsanitize=fuzzer,address,undefined`, seed a corpus, run with
+> `-jobs=$(nproc)`.
+
+### Writing your OWN harness (the edge — under-fuzzed paths)
+
+If the target only fuzzes the decoder, write a target for the **encoder/writer**:
+
+```cpp
+// fuzz_write.cc — libFuzzer harness for an under-fuzzed write path
+#include <cstdint>
+#include <cstddef>
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    // 1. read attacker-controlled input into the library's object model
+    // 2. then call the WRITE/ENCODE path that existing harnesses skip
+    //    e.g. parse metadata -> modify -> serialize back out
+    return 0;
+}
+```
+```bash
+clang++ -g -O1 -fsanitize=fuzzer,address,undefined \
+  fuzz_write.cc -I target/include target/lib.a -o fuzz_write
+./fuzz_write corpus -jobs="$(nproc)"
+```
+
+---
+
+## 7. Exact steps to claim the bounty
+
+Once §3 says the crash is a genuine, reachable memory-corruption:
+
+1. **Minimize the reproducer**
+   - libFuzzer: `./fuzz_target -minimize_crash=1 -runs=100000 crash-<hash>`
+   - AFL++: `afl-tmin -i crash-file -o min-file -- ./target @@`
+2. **Re-confirm** it still crashes on a clean build and capture the **full ASan trace**.
+3. **Write the report** containing exactly:
+   - Bug class + READ/WRITE (from the sanitizer header line)
+   - The minimized input file (attach it) + the crashing stack trace
+   - **Reachability/impact**: name a real entry point an attacker controls (a file a
+     user opens, a packet a server receives) and what the bug achieves
+     (RCE-grade write, info leak, etc.)
+   - Affected version / commit, and build flags used
+4. **Submit through the program that owns the project** (do *not* post it publicly first):
+
+   | Project | Where to submit | Reward |
+   |---|---|---|
+   | systemd, GLib, libsoup, and other Sovereign Tech scopes | YesWeHack program page for that project | €500–€10,000 |
+   | Google OSS (Go, protobuf, Bazel, Angular, Fuchsia) | https://bughunters.google.com → OSS VRP | $100–$31,337 |
+   | curl / libcurl | https://hackerone.com/curl | varies |
+   | Project with only a `SECURITY.md` (no cash) | GitHub "Report a vulnerability" / security email | CVE credit |
+   | Project you newly added fuzzing to | OSS-Fuzz integration reward (separate) | up to ~$30k |
+
+5. **Coordinated disclosure**: keep it private until the maintainer ships a fix and
+   agrees to disclose. Premature public disclosure can void the reward.
+6. **For the OSS-Fuzz integration reward**: upstream your harness into the project's
+   repo, get it building under OSS-Fuzz with sanitizers and >80% coverage, then claim
+   per https://google.github.io/oss-fuzz/getting-started/integration-rewards/
+
+**Realistic note:** "big bounty" here means low-thousands (Sovereign Tech) up to
+$31,337 (Google OSS VRP) for a strong report — not lottery money, and only for a
+*genuine, reachable, high-impact* bug with a clean reproducer. A raw crash with no
+demonstrated security impact is typically rejected. The portfolio pays through
+*volume of valid reports over time*, not a single hit.
+
+---
+
 ## Sources
 
 - Internet Bug Bounty — https://hackerone.com/ibb
