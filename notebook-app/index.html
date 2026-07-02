@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Test Notebook</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      background: #0f1115; color: #e6e6e6;
+    }
+    header {
+      padding: 20px 24px; border-bottom: 1px solid #232733;
+      display: flex; align-items: baseline; gap: 12px;
+    }
+    header h1 { margin: 0; font-size: 18px; font-weight: 650; }
+    header .sub { color: #8a91a0; font-size: 13px; }
+    main { max-width: 860px; margin: 0 auto; padding: 24px; }
+    .cell {
+      border: 1px solid #232733; border-radius: 10px; overflow: hidden;
+      margin-bottom: 16px; background: #151922;
+    }
+    .cell-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 12px; background: #1a1f2b; border-bottom: 1px solid #232733;
+      font-size: 12px; color: #8a91a0;
+    }
+    textarea {
+      width: 100%; min-height: 84px; resize: vertical; border: 0; outline: 0;
+      background: transparent; color: #e6e6e6; padding: 12px;
+      font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    button {
+      border: 1px solid #2f6feb; background: #2f6feb; color: white;
+      padding: 5px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+    }
+    button.ghost { background: transparent; color: #9db4ff; }
+    .out {
+      padding: 10px 12px; border-top: 1px solid #232733;
+      font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap;
+    }
+    .out.ok { color: #7ee787; } .out.err { color: #ff7b72; }
+    .status { margin-top: 8px; font-size: 12px; color: #8a91a0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🧪 Test Notebook</h1>
+    <span class="sub">runnable JS cells &middot; deployed on Vercel</span>
+  </header>
+  <main>
+    <p class="status" id="status">Ready. Edit a cell and press <b>Run</b> (or Ctrl/Cmd+Enter).</p>
+    <div id="cells"></div>
+    <button class="ghost" id="add">+ Add cell</button>
+  </main>
+
+  <script>
+    const seed = [
+      "// A cell returns its last expression.\n1 + 2 + 3",
+      "// Self-test: assert and report.\nconst tests = [\n  ['add', 2 + 2 === 4],\n  ['string', 'ab'.length === 2],\n  ['json', JSON.stringify({a:1}) === '{\"a\":1}'],\n];\ntests.map(([n, ok]) => (ok ? 'PASS ' : 'FAIL ') + n).join('\\n')",
+      "// Env probe.\n`ua: ${navigator.userAgent.slice(0,40)}...\\nnow: ${new Date().toISOString()}`",
+    ];
+    const wrap = document.getElementById('cells');
+    const status = document.getElementById('status');
+
+    function run(box) {
+      const code = box.querySelector('textarea').value;
+      const out = box.querySelector('.out');
+      try {
+        // eval() returns the completion value of the last expression,
+        // giving notebook-style "last line is the output" behaviour.
+        const fn = new Function('__code', 'return (async () => eval(__code))();');
+        Promise.resolve(fn(code)).then(r => {
+          out.className = 'out ok';
+          out.textContent = r === undefined ? '✓ ran (no return value)' : String(r);
+        }).catch(e => { out.className = 'out err'; out.textContent = '✗ ' + e; });
+      } catch (e) { out.className = 'out err'; out.textContent = '✗ ' + e; }
+    }
+
+    function makeCell(code) {
+      const box = document.createElement('div');
+      box.className = 'cell';
+      box.innerHTML =
+        '<div class="cell-bar"><span>js</span><button>Run ▷</button></div>' +
+        '<textarea spellcheck="false"></textarea>' +
+        '<div class="out">—</div>';
+      box.querySelector('textarea').value = code;
+      box.querySelector('button').onclick = () => run(box);
+      box.querySelector('textarea').addEventListener('keydown', e => {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(box); }
+      });
+      wrap.appendChild(box);
+      return box;
+    }
+
+    seed.forEach(makeCell);
+    document.getElementById('add').onclick = () => makeCell('// new cell\n');
+    // Auto-run the seed cells once so the deploy visibly "works".
+    [...wrap.children].forEach(run);
+    status.textContent = 'Loaded ' + seed.length + ' cells and auto-ran them.';
+  </script>
+</body>
+</html>

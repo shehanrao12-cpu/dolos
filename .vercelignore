@@ -1,0 +1,19 @@
+# Only the notebook-app static folder is deployed to Vercel.
+# Ignore the Rust project and everything else.
+crates
+src
+tests
+xtask
+examples
+adrs
+docs
+skills
+build.rs
+Cargo.toml
+Cargo.lock
+cliff.toml
+dist-workspace.toml
+rustfmt.toml
+CHANGELOG.md
+AGENTS.md
+.mcp.json
